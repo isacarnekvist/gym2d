@@ -1,9 +1,10 @@
+# Environments
 import abc
 import numpy as np
 import Box2D.b2 as Box2D
 
 from .viewer import Viewer
-from .objects import Arm, Box, Goal
+from .objects import Arm, Box
 
 
 def rand_in_range(a, b):
@@ -38,7 +39,7 @@ class OneArmCubePushing(Environment):
     
     def __init__(self):
         self.width = 400
-        self.time_step = 1.0 / 60.0
+        self.time_step = 1.0 / 24.0
         self.vel_iters = 6
         self.pos_iters = 2
         self.height = 300
@@ -47,54 +48,55 @@ class OneArmCubePushing(Environment):
         self.height_real = self.width_real * self.height / self.width
         self.origin = np.array([self.width / 2, self.height / 2])
         self.world = Box2D.world(gravity=(0.0, 0.0))
+        self.goal_position = (1.0, 0.0)
+        self.goal_radius = 0.2 * np.sqrt(2)
+        
+        # For plotting model predictions
+        self._traces = dict()
         
         # Insert objects, set position in _reset()
         self.box = Box(self.world, 0.0, 0.0, 0.0)
-        self.goal = Goal(0.0, 0.0, 0.2 * np.sqrt(2))
         self.arm = Arm(self.world, 0.0, 0.0)
         self.viewer = None
+        self._state_scalar = 10.0
         self._reset()
     
     def _reset(self):
-        box_x = rand_in_range(-1.0, 1.0)
-        box_y = rand_in_range(-0.5, 0.5)
-        box_angle = rand_in_range(0, np.pi)
-        self.box.box.position = (box_x, box_y)
-        self.box.box.angle = box_angle
-        goal_x = rand_in_range(-1.0, 1.0)
-        goal_y = rand_in_range(-0.5, 0.5)
-        self.goal.position = (goal_x, goal_y)
-        while True:
-            arm_x = rand_in_range(-1.0, 1.0)
-            arm_y = rand_in_range(-0.5, 0.5)
-            if np.linalg.norm([arm_x - box_x, arm_y - box_y]) > 0.4:
-                self.arm.arm.position = (arm_x, arm_y)
-                break
-        self.drawables = [
-            self.goal, self.arm, self.box
-        ]
-        return self._get_state()
+        self.box.body.position = (0.0, 0.0)
+        self.box.body.angle = 0.0
+        self.box.body.linearVelocity = (0.0, 0.0)
+        self.box.body.angularVelocity = 0.0
+        angle = 2 * np.pi * np.random.rand()
+        self.arm.body.position = (0.25 * np.sqrt(2) * np.cos(angle), 0.25 * np.sqrt(2) * np.sin(angle))
+        self.arm.body.linearVelocity = (0.0, 0.0)
+        return self.get_state()
+    
+    def add_trace(self, key, state):
+        if key not in self._traces:
+            self._traces[key] = []
+        self._traces[key].append(
+            state / self._state_scalar
+        )
         
-    def _get_state(self):
+    def get_state(self):
         return np.array([
-            *self.arm.arm.position,
-            *self.arm.arm.linearVelocity,
-            *self.box.box.position,
-            self.box.box.angle,
-            *self.box.box.linearVelocity,
-            self.box.box.angularVelocity,
-            *self.goal.position
-        ])
+            *self.arm.body.position,       # 0, 1
+            *self.arm.body.linearVelocity, # 2, 3
+            *self.box.body.position,       # 4, 5
+            np.cos(self.box.body.angle), np.sin(self.box.body.angle),
+            *self.box.body.linearVelocity, # 8, 9
+            self.box.body.angularVelocity, # 10
+            *self.goal_position            # 11, 12
+        ]).astype(np.float32) * self._state_scalar
     
     def _step(self, x):
-        direction = x[:2]
-        if np.linalg.norm(direction) > 0.0:
-            direction /= np.linalg.norm(direction)
-        norm = x[-1]
-        self.arm.apply_force(*(norm * direction))
+        u = np.zeros(2)
+        if np.linalg.norm(x[:2]) > 0:
+            u = x[-1] * np.array(x[:2]) / np.linalg.norm(x[:2])
+        self.arm.body.ApplyForceToCenter(list(map(np.float64, u)), False)
         self.world.Step(self.time_step, self.vel_iters, self.pos_iters)
         return (
-            self._get_state(),
+            self.get_state(),
             0.0, # reward externally defined for now
             False,
             {}
@@ -103,9 +105,21 @@ class OneArmCubePushing(Environment):
     def _render(self):
         if not self.viewer:
             self.viewer = Viewer(400, 300, 200, 150, 400 / 4)
-        self.viewer.fill((240, 240, 240))
-        for drawable in self.drawables:
-            self.viewer.draw(drawable)
+        self.viewer.fill('w')
+        
+        self.viewer.draw_circle(*self.goal_position, self.goal_radius, filled=False)
+        for obj, color in [(self.box, 'r'), (self.arm, 'k')]:
+            self.viewer.draw_box2d(
+                obj.fixture.shape,
+                obj.body.transform,
+                color
+            )
+            
+        for value in self._traces.values():
+            X = np.array(value)
+            self.viewer.draw_line(X[:, 0], X[:, 1], 'k')
+            self.viewer.draw_line(X[:, 4], X[:, 5], (100, 0, 0))
+
         self.viewer.render()
         
     def world2pixel(self, x, y):
